@@ -128,25 +128,70 @@ systemctl status httpd
 
 ## 5. Step 8 — Upgrade Elasticsearch to 8.4 (21:00 – 22:00)
 **Owner:** Azrul / Indra / Prabhu
-**Scope:** fruitcake
+**Scope:** fruitcake (gcc-fruitcake.nyp.edu.sg)
 
-Baseline before upgrade: Elasticsearch 7.17.21-1, running via systemd, uptime observed ~2 weeks 6 days in NonProd check.
+### 5.1 Environment and constraints
 
-> ⚠️ **Known issue from NonProd testing:** running `/usr/share/elasticsearch/bin/elasticsearch --version` directly (outside systemd) failed with a JVM `RuntimeException: starting java failed` / `Native memory allocation (mmap) failed to map 8241807360 bytes... Not enough space`. This was a manual invocation issue (insufficient memory available to that ad-hoc JVM launch), not necessarily the running service — but worth checking available memory headroom on fruitcake before starting the 8.4 upgrade, since 7.x → 8.x is a major version jump.
+Fruitcake is running Elasticsearch 7.17.21-1 via systemd, confirmed as a **single-node deployment** — the running `systemctl status` output shows exactly one Java process (PID 1165 at last check) with no cluster peers. This matters because Elastic only supports true rolling, zero-downtime upgrades *within* the same major version. A 7.x → 8.x jump is a major-version boundary regardless of node count, and with only one node in this deployment there is no second node to absorb traffic while the first is upgraded. In practice this means the upgrade is a stop → install → start sequence, and SugarCRM's search functionality will be unavailable for the duration. That outage needs to be accounted for inside the 21:00–22:00 window rather than assumed away.
 
-Useful pre-checks:
+The node is also carrying real memory pressure already: at the last check the JVM was holding 10.8G at steady state. Separately, during NonProd testing, invoking `/usr/share/elasticsearch/bin/elasticsearch --version` directly (outside systemd) failed with a JVM `RuntimeException: starting java failed`, caused by a native memory allocation (mmap) failure when trying to reserve roughly 8.2G. That specific failure was tied to an ad-hoc manual invocation rather than the actual running service, so it isn't proof the upgrade itself will fail — but given that PROD is already at 10.8G and 8.4 may require more heap at startup than 7.17 did, it's worth running `free -h` and reviewing the heap settings in `/etc/elasticsearch/jvm.options` on fruitcake before starting, to confirm there's enough headroom for the new version to come up cleanly.
+
+One more environmental factor: the RHUI package repository on this fleet has been unreliable — `dnf` operations on cupcake1 and fruitcake in earlier NonProd checks failed with `curl error 58` (local SSL certificate problems reaching the RHUI mirror). Given that, the 8.4.x Elasticsearch RPM should be downloaded and staged locally ahead of the window rather than assuming `dnf install` will succeed live during the cutover.
+
+### 5.2 Pre-upgrade verification
+
+Before touching the service, confirm the current state and rule out anything that would block the upgrade outright. Elasticsearch 8.x can read indices created in 7.x, but it will refuse to start entirely if the cluster contains any index that was originally created before 7.0 and was never reindexed. Since 7.17 already includes an Upgrade Assistant (via Kibana, if Kibana is in use here) for exactly this kind of check, that's the fastest way to confirm there's nothing blocking. If Kibana isn't available, the index creation version can be checked directly:
+
+```bash
+curl -s -X GET "localhost:9200/my-index/_settings?filter_path=**.version.created"
+```
+
+It's also worth reviewing whether any ILM (index lifecycle management) policies reference settings that 8.0 removed — translog retention settings and the `_type` field in mappings are the two most commonly hit. If SugarCRM's search queries or index templates rely on either, they'll need updating post-upgrade.
+
+Finally, confirm the current package and service state as a baseline to compare against after the upgrade:
+
 ```bash
 rpm -qa | grep -i elasticsearch
 systemctl status elasticsearch
 curl -s -X GET "localhost:9200/_nodes?pretty" | grep -i version
 ```
 
-> ⏳ *Add here: the actual 7.17 → 8.4 upgrade procedure (this is a major version jump — confirm whether it's a direct upgrade or requires an intermediate step, index compatibility checks, and reindex plan if needed). Not yet validated in the NonProd session provided.*
+### 5.3 Backup
 
-- [ ] Confirm cluster/indices health green before starting
-- [ ] Perform upgrade
-- [ ] Confirm `curl -s -X GET "localhost:9200/_nodes?pretty" | grep -i version` reports 8.4.x
-- [ ] Confirm SugarCRM search functionality against the upgraded ES
+Take an Elasticsearch-level snapshot to a snapshot repository before proceeding. This is distinct from the EC2-level snapshot taken in §3 — that captures the disk/instance state, while this captures the indices themselves in a form that can be restored without needing to roll back the whole instance. If a snapshot repository isn't already configured on this cluster, one will need to be set up first; this step should not be skipped given it's the fastest rollback path if the upgrade goes wrong.
+
+### 5.4 Performing the upgrade
+
+With the pre-checks and snapshot done, stop the service:
+
+```bash
+sudo systemctl stop elasticsearch
+```
+
+Install the staged 8.4.x package. Since repo access can't be relied on during the window, install from the locally staged RPM directly:
+
+```bash
+sudo rpm -Uvh elasticsearch-8.4.x-x86_64.rpm
+```
+
+(If `dnf` access to the repo is confirmed working by the time of the cutover, `sudo dnf install elasticsearch-8.4.x` is the alternative — but the local RPM should be the fallback either way.)
+
+Start the service back up:
+
+```bash
+sudo systemctl start elasticsearch
+```
+
+### 5.5 Post-upgrade verification
+
+Confirm the service came up cleanly and is reporting the new version:
+
+```bash
+systemctl status elasticsearch
+curl -s -X GET "localhost:9200/_nodes?pretty" | grep -i version
+```
+
+The version reported should be 8.4.x. Beyond the version check, two things are specific to this jump and worth confirming explicitly. First, Elasticsearch 8.x enables security (TLS and authentication) by default, which 7.17 may not have had enabled — if SugarCRM's Elasticsearch client was previously connecting to `localhost:9200` without credentials, that connection will likely break post-upgrade until SugarCRM's configuration is updated to match whatever authentication 8.4 is now enforcing. Second, confirm actual search functionality inside SugarCRM itself (not just the ES API) — a ticket or record search that exercises the index end-to-end is the real test that the upgrade succeeded from the application's point of view, not just that the service is "active (running)".
 
 ---
 
