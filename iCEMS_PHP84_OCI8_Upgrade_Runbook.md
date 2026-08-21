@@ -67,6 +67,9 @@
 The remi-8.4 stream was found **disabled** on the NonProd test host, which blocked `php-devel`/`php-pear` installation via modular filtering. Run this first:
 
 ```bash
+sudo dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+sudo dnf install -y https://rpms.remirepo.net/enterprise/remi-release-8.rpm
+
 sudo sed -i \
   -e 's|^mirrorlist=|#mirrorlist=|' \
   -e 's|^#baseurl=http://rpms.remirepo.net|baseurl=https://rpms.remirepo.net|' \
