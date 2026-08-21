@@ -76,6 +76,7 @@ sudo sed -i \
   /etc/yum.repos.d/remi*.repo
 
 sudo dnf clean all
+sudo dnf module reset php
 sudo dnf module list php
 sudo dnf module enable php:remi-8.4 -y
 php -v
