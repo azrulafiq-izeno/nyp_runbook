@@ -67,10 +67,16 @@
 The remi-8.4 stream was found **disabled** on the NonProd test host, which blocked `php-devel`/`php-pear` installation via modular filtering. Run this first:
 
 ```bash
-sudo dnf module reset php
+sudo sed -i \
+  -e 's|^mirrorlist=|#mirrorlist=|' \
+  -e 's|^#baseurl=http://rpms.remirepo.net|baseurl=https://rpms.remirepo.net|' \
+  /etc/yum.repos.d/remi*.repo
+
+sudo dnf clean all
+sudo dnf module list php
 sudo dnf module enable php:remi-8.4 -y
 php -v
-rpm -qa | grep php-cli
+
 ```
 Expect PHP to report **8.4.x** (NonProd test showed 8.4.15 initially).
 
